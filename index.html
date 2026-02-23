@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-TW">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>可愛目標追蹤器</title>
+    
+    <!-- 使用 CDN 方式載入，完全跳過本地 PostCSS 報錯 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <style type="text/css">
+      /* 這裡使用最標準的 CSS，確保不會被編譯器報錯 */
+      html, body, #root {
+        height: 100% !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        background: #fdf2f8; /* 預設一個粉色底 */
+        background: linear-gradient(to bottom right, #fdf2f8, #ffffff, #f5f3ff) !important;
+        font-family: sans-serif !important;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
