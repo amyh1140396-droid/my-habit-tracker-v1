@@ -13,7 +13,9 @@ import {
   getRedirectResult, 
   GoogleAuthProvider, 
   onAuthStateChanged, 
-  signOut 
+  signOut,
+  setPersistence,
+  browserLocalPersistence
 } from 'firebase/auth';
 import { 
   getFirestore, 
@@ -28,6 +30,7 @@ import {
 
 // --- Firebase 初始化 ---
 // ⚠️ 務必在此處填入您從 Firebase Console 取得的金鑰 ⚠️
+// 💡 特別檢查：authDomain 必須與您的 Vercel 網址或 firebaseapp.com 一致
 const firebaseConfig = {
   apiKey: "AIzaSyDOEU8JitsOszMaQyBt2dhD-9iF4f1ZVs8",
   authDomain: "my-habit-tracker-v1.firebaseapp.com",
@@ -100,7 +103,7 @@ const triggerConfetti = (type) => {
 export default function App() {
   const [user, setUser] = useState(null);
   const [authReady, setAuthReady] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(true); // 用來追蹤是否正在處理登入回傳
+  const [isProcessing, setIsProcessing] = useState(true); 
   const [activeTab, setActiveTab] = useState('today'); 
   const [toastMsg, setToastMsg] = useState('');
   
@@ -132,20 +135,27 @@ export default function App() {
     return () => { if (document.body.contains(script)) document.body.removeChild(script); };
   }, []);
 
-  // 2. 核心 Auth 監聽邏輯
+  // 2. 強化版 Auth 監聽：解決手機登入迴圈
   useEffect(() => {
-    const handleAuth = async () => {
+    const initAuth = async () => {
       try {
-        // 先嘗試抓取跳轉後的回傳結果
+        // A. 強制持久化登入狀態
+        await setPersistence(auth, browserLocalPersistence);
+
+        // B. 檢查是否是從 Redirect 回來的
         const result = await getRedirectResult(auth);
         if (result?.user) {
           setUser(result.user);
+          console.log("Redirect Login Success");
         }
       } catch (error) {
-        console.error("Redirect Login Error:", error);
-        showToast("登入過程發生錯誤，請重試。");
+        console.error("Auth Init Error:", error);
+        // 如果是跨網域問題，這裡會報錯
+        if (error.code === 'auth/cross-origin-isolated-biometric-fallback') {
+          showToast("瀏覽器限制了登入，請嘗試在一般分頁開啟。");
+        }
       } finally {
-        // 不論成功失敗，都監聽真正的 Auth 狀態
+        // C. 監聽狀態變化 (這是最準確的登入判斷)
         const unsub = onAuthStateChanged(auth, (u) => {
           setUser(u);
           setAuthReady(true);
@@ -155,15 +165,18 @@ export default function App() {
       }
     };
 
-    const unsubAuth = handleAuth();
+    const unsubAuth = initAuth();
     return () => { if (typeof unsubAuth === 'function') unsubAuth(); };
   }, [showToast]);
 
   const handleGoogleLogin = async () => {
     const provider = new GoogleAuthProvider();
-    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    // 讓每次登入都強制顯示帳號選擇器 (解決自動跳轉問題)
+    provider.setCustomParameters({ prompt: 'select_account' });
     
+    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
     setIsProcessing(true);
+
     try {
       if (isMobile) {
         await signInWithRedirect(auth, provider);
@@ -174,12 +187,12 @@ export default function App() {
       }
     } catch (error) {
       console.error(error);
-      showToast("無法開啟登入視窗。");
+      showToast("無法啟動登入視窗。");
       setIsProcessing(false);
     }
   };
 
-  // 3. 監聽 Firestore 資料
+  // 3. 監聽 Firestore 資料 (保持不變)
   useEffect(() => {
     if (!user) return;
     const privatePath = (col) => collection(db, 'artifacts', appId, 'users', user.uid, col);
@@ -198,7 +211,7 @@ export default function App() {
     return () => unsubs.forEach(unsub => unsub());
   }, [user]);
 
-  // 結算與邏輯 (其餘保持不變)
+  // 結算報告邏輯 (保持不變)
   useEffect(() => {
     if (!user || !profile?.displayName) return;
     const prevWeekId = getPreviousWeekId(currentWeekId);
@@ -390,7 +403,7 @@ export default function App() {
   );
 }
 
-// --- 分頁與元件 (內部邏輯保持與原版一致) ---
+// --- 其餘組件保持不變 ---
 function NavBtn({ icon: Icon, label, active, onClick, color }) {
   const cMap = { pink: 'text-pink-600 bg-pink-100', blue: 'text-blue-600 bg-blue-100', amber: 'text-amber-600 bg-amber-100', emerald: 'text-emerald-600 bg-emerald-100' };
   return (
@@ -495,10 +508,17 @@ function HistoryView({ dailyScores, onDayClick }) {
   );
 }
 
-function LeaderboardView({ leaderboard, currentWeekId, user }) {
+function LeaderboardView({ profile, leaderboard, currentWeekId, user }) {
+  const isOpted = leaderboard.some(e => e.userId === user.uid && e.weekId === currentWeekId);
   const lb = leaderboard.filter(e => e.weekId === currentWeekId).sort((a,b)=>b.score-a.score);
+  const handleToggle = async (val) => {
+    const lbRef = doc(db, 'artifacts', appId, 'public', 'data', 'leaderboard', `${currentWeekId}_${user.uid}`);
+    if (val) await setDoc(lbRef, { weekId: currentWeekId, userId: user.uid, displayName: profile.displayName, score: 0 }); 
+    else await deleteDoc(lbRef);
+  };
   return (
     <div className="p-5 animate-fade-in space-y-4">
+      <div className="bg-white rounded-3xl p-5 shadow-sm border-2 border-amber-50 flex justify-between items-center"><div className="flex flex-col"><span className="font-black text-slate-800">參與本週共同排行</span><span className="text-xs text-slate-400">與好友一起競爭吧！</span></div><Toggle checked={isOpted} onChange={handleToggle} /></div>
       <div className="bg-white rounded-[2rem] shadow-xl border-2 border-amber-50 overflow-hidden"><div className="bg-amber-50 p-5 border-b-2 border-white text-center font-black"><Trophy className="inline mb-1 mr-1" size={18} /> 當週風雲榜<div className="text-[10px] text-amber-500 mt-1">結算週期: {getWeekRange(currentWeekId)}</div></div>
       <div className="p-3 min-h-[300px]">{lb.length === 0 ? <div className="text-center py-20 text-slate-400 font-bold">👻 本週尚無排名</div> : lb.map((e,i)=>(<div key={e.userId} className={`flex items-center justify-between p-3.5 mb-2 rounded-2xl ${e.userId === user.uid ? 'bg-amber-100 border-amber-200 border-2' : 'bg-slate-50 shadow-sm'}`}><div className="flex items-center gap-4"><div className="w-8 h-8 rounded-full bg-white flex items-center justify-center font-black shadow-inner">{i+1}</div><span className="font-black">{e.displayName}</span></div><span className="font-black text-amber-600">{e.score}分</span></div>))}</div></div>
     </div>
@@ -518,7 +538,6 @@ function SettingsView({ user, profile, onLogout }) {
   );
 }
 
-// --- 輔助組件 ---
 function TaskModal({ onClose, onSave, activeDateStr, initialData, showToast }) {
   const [title, setTitle] = useState(initialData?.title || '');
   const [pts, setPts] = useState(initialData?.points || 10);
@@ -573,6 +592,14 @@ function Marker({ left, score, icon, color }) {
     <div className="absolute top-0 h-full border-l-[3px] border-white/80 flex flex-col items-center justify-center z-10" style={{ left: `${left}%` }}>
       <div className={`absolute -top-6 text-[11px] font-black ${colors[color]}`}>{score}</div><div className="text-[14px] drop-shadow-sm">{icon}</div>
     </div>
+  );
+}
+
+function Toggle({ checked, onChange }) {
+  return (
+    <button type="button" onClick={() => onChange(!checked)} className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors duration-300 shadow-inner ${checked ? 'bg-green-400' : 'bg-slate-200'}`}>
+      <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition-transform duration-300 ${checked ? 'translate-x-6' : 'translate-x-1'}`} />
+    </button>
   );
 }
 
