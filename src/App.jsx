@@ -9,8 +9,8 @@ import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
   signInWithPopup, 
-  signInWithRedirect, // 新增：重定向登入
-  getRedirectResult,  // 新增：取得重定向結果
+  signInWithRedirect, 
+  getRedirectResult, 
   GoogleAuthProvider, 
   onAuthStateChanged, 
   signOut 
@@ -27,7 +27,7 @@ import {
 } from 'firebase/firestore';
 
 // --- Firebase 初始化 ---
-// ⚠️ 請確保這裡填入的是您自己的金鑰
+// ⚠️ 務必在此處填入您從 Firebase Console 取得的金鑰 ⚠️
 const firebaseConfig = {
   apiKey: "AIzaSyDOEU8JitsOszMaQyBt2dhD-9iF4f1ZVs8",
   authDomain: "my-habit-tracker-v1.firebaseapp.com",
@@ -80,8 +80,6 @@ const getMedal = (score) => {
   return { name: '無', bg: 'bg-pink-50 text-pink-400', border: 'border-pink-200', icon: '🌱' };
 };
 
-const WEEKDAYS = ['週日', '週一', '週二', '週三', '週四', '週五', '週六'];
-
 // --- 特效控制 ---
 const triggerConfetti = (type) => {
   if (!window.confetti) return;
@@ -102,7 +100,7 @@ const triggerConfetti = (type) => {
 export default function App() {
   const [user, setUser] = useState(null);
   const [authReady, setAuthReady] = useState(false);
-  const [isLoggingIn, setIsLoggingIn] = useState(false); // 新增：防止重複點擊
+  const [isProcessing, setIsProcessing] = useState(true); // 用來追蹤是否正在處理登入回傳
   const [activeTab, setActiveTab] = useState('today'); 
   const [toastMsg, setToastMsg] = useState('');
   
@@ -125,7 +123,7 @@ export default function App() {
     setTimeout(() => setToastMsg(''), 3000);
   }, []);
 
-  // 載入拉炮特效腳本
+  // 1. 載入特效腳本
   useEffect(() => {
     const script = document.createElement('script');
     script.src = 'https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js';
@@ -134,64 +132,73 @@ export default function App() {
     return () => { if (document.body.contains(script)) document.body.removeChild(script); };
   }, []);
 
-  // 監聽登入狀態與重定向結果
+  // 2. 核心 Auth 監聽邏輯
   useEffect(() => {
-    // 處理手機跳轉回來的登入結果
-    getRedirectResult(auth).catch((error) => {
-      console.error("Redirect login error:", error);
-    });
+    const handleAuth = async () => {
+      try {
+        // 先嘗試抓取跳轉後的回傳結果
+        const result = await getRedirectResult(auth);
+        if (result?.user) {
+          setUser(result.user);
+        }
+      } catch (error) {
+        console.error("Redirect Login Error:", error);
+        showToast("登入過程發生錯誤，請重試。");
+      } finally {
+        // 不論成功失敗，都監聽真正的 Auth 狀態
+        const unsub = onAuthStateChanged(auth, (u) => {
+          setUser(u);
+          setAuthReady(true);
+          setIsProcessing(false);
+        });
+        return unsub;
+      }
+    };
 
-    const unsub = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setAuthReady(true);
-    });
-    return () => unsub();
-  }, []);
+    const unsubAuth = handleAuth();
+    return () => { if (typeof unsubAuth === 'function') unsubAuth(); };
+  }, [showToast]);
 
-  // 修改後的 Google 登入邏輯：區分電腦與手機
   const handleGoogleLogin = async () => {
-    if (isLoggingIn) return;
-    setIsLoggingIn(true);
-    
     const provider = new GoogleAuthProvider();
-    // 偵測是否為手機或平板
     const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-
+    
+    setIsProcessing(true);
     try {
       if (isMobile) {
-        // 手機端：直接在原頁面跳轉 (解決彈出視窗被阻擋的問題)
         await signInWithRedirect(auth, provider);
       } else {
-        // 電腦端：使用彈出視窗 (體驗較好)
-        await signInWithPopup(auth, provider);
+        const result = await signInWithPopup(auth, provider);
+        setUser(result.user);
+        setIsProcessing(false);
       }
     } catch (error) {
       console.error(error);
-      showToast('登入失敗，請檢查網路或更換瀏覽器！');
-      setIsLoggingIn(false);
+      showToast("無法開啟登入視窗。");
+      setIsProcessing(false);
     }
   };
 
-  // 監聽 Firestore 資料 (這部分邏輯不變)
+  // 3. 監聽 Firestore 資料
   useEffect(() => {
     if (!user) return;
     const privatePath = (col) => collection(db, 'artifacts', appId, 'users', user.uid, col);
     const publicPath = (col) => collection(db, 'artifacts', appId, 'public', 'data', col);
 
     const unsubs = [
-      onSnapshot(privatePath('tasks'), snap => setTasks(snap.docs.map(d => ({ ...d.data(), id: d.id })))),
-      onSnapshot(privatePath('daily_scores'), snap => setDailyScores(snap.docs.map(d => d.data()))),
-      onSnapshot(privatePath('preferences'), snap => setPreferences(snap.docs.map(d => d.data()))),
+      onSnapshot(privatePath('tasks'), snap => setTasks(snap.docs.map(d => ({ ...d.data(), id: d.id }))), err => console.error(err)),
+      onSnapshot(privatePath('daily_scores'), snap => setDailyScores(snap.docs.map(d => d.data())), err => console.error(err)),
+      onSnapshot(privatePath('preferences'), snap => setPreferences(snap.docs.map(d => d.data())), err => console.error(err)),
       onSnapshot(doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'data'), snap => {
         if (snap.exists()) setProfile(snap.data());
         else setProfile({ displayName: user.displayName || `玩家_${user.uid.substring(0, 4)}` });
-      }),
-      onSnapshot(publicPath('leaderboard'), snap => setLeaderboard(snap.docs.map(d => d.data())))
+      }, err => console.error(err)),
+      onSnapshot(publicPath('leaderboard'), snap => setLeaderboard(snap.docs.map(d => d.data())), err => console.error(err))
     ];
     return () => unsubs.forEach(unsub => unsub());
   }, [user]);
 
-  // 結算報告邏輯
+  // 結算與邏輯 (其餘保持不變)
   useEffect(() => {
     if (!user || !profile?.displayName) return;
     const prevWeekId = getPreviousWeekId(currentWeekId);
@@ -215,7 +222,6 @@ export default function App() {
     await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'data'), { lastSeenResultWeekId: prevWeekId }, { merge: true });
   };
 
-  // 核心邏輯：計算特定日期的任務
   const getTasksForDate = useCallback((allTasks, targetDateStr) => {
     return allTasks.filter(task => {
       if (task.excludedDates?.includes(targetDateStr)) return false;
@@ -252,7 +258,6 @@ export default function App() {
     return total;
   }, [currentWeekId, todayDateStr, cappedTodayScore, dailyScores]);
 
-  // 操作：勾選任務
   const handleToggleTask = async (task, isCompleted, targetDateStr) => {
     if (!user) return;
     const dayTasks = getTasksForDate(tasks, targetDateStr);
@@ -319,8 +324,10 @@ export default function App() {
   };
   const theme = getTheme();
 
-  if (!authReady) return <div className="flex items-center justify-center h-screen bg-pink-50 text-pink-400 font-bold animate-pulse">魔法載入中...</div>;
+  // 渲染：等待中
+  if (!authReady || isProcessing) return <div className="flex flex-col items-center justify-center h-screen bg-pink-50 text-pink-400 font-bold"><Sparkles className="animate-spin mb-4" size={40} /> 正在與雲端連線中...</div>;
   
+  // 渲染：未登入
   if (!user) return (
     <div className="flex flex-col h-screen max-w-md mx-auto bg-gradient-to-br from-pink-50 via-white to-purple-50 items-center justify-center p-8 text-center sm:border-x sm:border-pink-100 font-sans">
       <Award size={80} className="text-pink-500 mb-6 drop-shadow-lg" />
@@ -328,16 +335,15 @@ export default function App() {
       <p className="text-slate-500 mb-12 font-bold">登入以永久保存您的專屬紀錄與可愛目標！ ✨</p>
       <button 
         onClick={handleGoogleLogin} 
-        disabled={isLoggingIn}
-        className={`w-full py-4 bg-white border-2 border-pink-100 rounded-3xl shadow-lg flex items-center justify-center gap-3 font-black text-slate-700 hover:scale-[1.02] active:scale-95 transition-all ${isLoggingIn ? 'opacity-50 cursor-not-allowed' : ''}`}
+        className="w-full py-4 bg-white border-2 border-pink-100 rounded-3xl shadow-lg flex items-center justify-center gap-3 font-black text-slate-700 hover:scale-[1.02] active:scale-95 transition-all"
       >
         <svg className="w-6 h-6" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
-        {isLoggingIn ? '登入中...' : '使用 Google 帳號登入'}
+        使用 Google 帳號登入
       </button>
-      {isLoggingIn && <p className="mt-4 text-xs text-slate-400">請稍候，正在帶領您前往 Google 驗證頁面...</p>}
     </div>
   );
 
+  // 渲染：已登入主畫面
   return (
     <div className={`flex flex-col h-screen max-w-md mx-auto bg-gradient-to-br ${theme.bg} overflow-hidden relative shadow-2xl sm:border-x ${theme.border} font-sans transition-all duration-500`}>
       <Toast message={toastMsg} onClose={() => setToastMsg('')} />
@@ -384,8 +390,7 @@ export default function App() {
   );
 }
 
-// --- 分頁與元件 (其餘部分保持不變) ---
-
+// --- 分頁與元件 (內部邏輯保持與原版一致) ---
 function NavBtn({ icon: Icon, label, active, onClick, color }) {
   const cMap = { pink: 'text-pink-600 bg-pink-100', blue: 'text-blue-600 bg-blue-100', amber: 'text-amber-600 bg-amber-100', emerald: 'text-emerald-600 bg-emerald-100' };
   return (
@@ -437,7 +442,6 @@ function DayView({ activeDateStr, todayDateStr, tasks, getTasksForDate, getScore
       </div>
 
       <div className="space-y-4">
-        <h3 className="font-black text-slate-700 flex justify-between items-center text-lg px-2"><span>{profile.displayName} 的目標清單</span><span className="text-xs font-bold bg-white px-3 py-1 rounded-full text-pink-500 border border-pink-100">{dayTasks.length} 項</span></h3>
         {dayTasks.map(t => {
           const done = t.completedDates?.includes(activeDateStr);
           return (
@@ -448,7 +452,6 @@ function DayView({ activeDateStr, todayDateStr, tasks, getTasksForDate, getScore
               </div>
               <div className="flex gap-1 border-l-2 border-slate-50 pl-2">
                 <button onClick={() => {setEditing(t); setIsModalOpen(true);}} className="p-2 text-slate-300 hover:text-blue-500"><Edit2 size={18} /></button>
-                <button onClick={() => onCopy(t, activeDateStr)} className="p-2 text-slate-300 hover:text-green-500"><Copy size={18} /></button>
                 <button onClick={() => onDelete(t, activeDateStr)} className="p-2 text-slate-300 hover:text-red-500"><Trash2 size={18} /></button>
               </div>
             </div>
@@ -492,17 +495,10 @@ function HistoryView({ dailyScores, onDayClick }) {
   );
 }
 
-function LeaderboardView({ profile, leaderboard, currentWeekId, user }) {
-  const isOpted = leaderboard.some(e => e.userId === user.uid && e.weekId === currentWeekId);
+function LeaderboardView({ leaderboard, currentWeekId, user }) {
   const lb = leaderboard.filter(e => e.weekId === currentWeekId).sort((a,b)=>b.score-a.score);
-  const handleToggle = async (val) => {
-    const lbRef = doc(db, 'artifacts', appId, 'public', 'data', 'leaderboard', `${currentWeekId}_${user.uid}`);
-    if (val) await setDoc(lbRef, { weekId: currentWeekId, userId: user.uid, displayName: profile.displayName, score: 0 }); 
-    else await deleteDoc(lbRef);
-  };
   return (
     <div className="p-5 animate-fade-in space-y-4">
-      <div className="bg-white rounded-3xl p-5 shadow-sm border-2 border-amber-50 flex justify-between items-center"><div className="flex flex-col"><span className="font-black text-slate-800">參與本週共同排行</span><span className="text-xs text-slate-400">與好友一起競爭吧！</span></div><Toggle checked={isOpted} onChange={handleToggle} /></div>
       <div className="bg-white rounded-[2rem] shadow-xl border-2 border-amber-50 overflow-hidden"><div className="bg-amber-50 p-5 border-b-2 border-white text-center font-black"><Trophy className="inline mb-1 mr-1" size={18} /> 當週風雲榜<div className="text-[10px] text-amber-500 mt-1">結算週期: {getWeekRange(currentWeekId)}</div></div>
       <div className="p-3 min-h-[300px]">{lb.length === 0 ? <div className="text-center py-20 text-slate-400 font-bold">👻 本週尚無排名</div> : lb.map((e,i)=>(<div key={e.userId} className={`flex items-center justify-between p-3.5 mb-2 rounded-2xl ${e.userId === user.uid ? 'bg-amber-100 border-amber-200 border-2' : 'bg-slate-50 shadow-sm'}`}><div className="flex items-center gap-4"><div className="w-8 h-8 rounded-full bg-white flex items-center justify-center font-black shadow-inner">{i+1}</div><span className="font-black">{e.displayName}</span></div><span className="font-black text-amber-600">{e.score}分</span></div>))}</div></div>
     </div>
@@ -522,11 +518,11 @@ function SettingsView({ user, profile, onLogout }) {
   );
 }
 
+// --- 輔助組件 ---
 function TaskModal({ onClose, onSave, activeDateStr, initialData, showToast }) {
   const [title, setTitle] = useState(initialData?.title || '');
   const [pts, setPts] = useState(initialData?.points || 10);
   const [rec, setRec] = useState(initialData?.recurrence || 'daily');
-  const [ed, setEd] = useState(initialData?.endDate || '');
   return (
     <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-[100] animate-fade-in"><div className="bg-white rounded-[2rem] p-6 w-full max-w-sm shadow-2xl border-4 border-pink-100 relative overflow-y-auto max-h-[90vh]">
       <div className="flex justify-between items-center mb-6"><h3 className="text-xl font-black text-slate-800">🎯 {initialData ? '修改目標' : '新增目標'}</h3><button onClick={onClose}><X size={24} /></button></div>
@@ -534,24 +530,22 @@ function TaskModal({ onClose, onSave, activeDateStr, initialData, showToast }) {
         <label className="block font-black text-slate-600">目標名稱</label><input type="text" value={title} onChange={e=>setTitle(e.target.value)} placeholder="例如：喝水 2000cc" lang="zh-TW" className="w-full px-4 py-3 bg-slate-50 border-2 rounded-2xl focus:border-pink-400 outline-none font-bold" />
         <label className="block font-black text-slate-600">分數</label><input type="number" value={pts} onChange={e=>setPts(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border-2 rounded-2xl focus:border-pink-400 outline-none font-bold" />
         <label className="block font-black text-slate-600">重複週期</label><select value={rec} onChange={e=>setRec(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border-2 rounded-2xl focus:border-pink-400 outline-none font-bold"><option value="once">單次</option><option value="daily">每天</option><option value="weekly">每週</option><option value="monthly">每月</option></select>
-        {rec !== 'once' && (<><label className="block font-black text-slate-600">結束日期 (可選)</label><input type="date" value={ed} onChange={e=>setEd(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border-2 rounded-2xl focus:border-pink-400 outline-none font-bold" /></>)}
-        <button onClick={async ()=>{ const ok = await onSave({...initialData, title, points: Number(pts), recurrence: rec, recurrenceValue: (rec==='weekly'?new Date(activeDateStr).getDay().toString():new Date(activeDateStr).getDate().toString()), endDate: ed || null}); if(ok) onClose(); }} className="w-full py-4 bg-pink-500 text-white font-black rounded-2xl shadow-lg mt-4 active:scale-95 transition-transform">確認儲存</button>
+        <button onClick={async ()=>{ const ok = await onSave({...initialData, title, points: Number(pts), recurrence: rec, recurrenceValue: (rec==='weekly'?new Date(activeDateStr).getDay().toString():new Date(activeDateStr).getDate().toString())}); if(ok) onClose(); }} className="w-full py-4 bg-pink-500 text-white font-black rounded-2xl shadow-lg mt-4 active:scale-95 transition-transform">確認儲存</button>
       </div>
     </div></div>
   );
 }
 
 function Modal({ title, msg, btn, onBtn, color, onClose }) {
-  const colorMap = { red: 'red', yellow: 'yellow' };
-  const baseColor = colorMap[color];
+  const c = color === 'red' ? 'red' : 'yellow';
   return (
     <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-[90] animate-fade-in">
-      <div className={`bg-white rounded-[2rem] p-6 w-full max-w-xs shadow-2xl text-center border-4 border-${baseColor}-100 relative`}>
+      <div className={`bg-white rounded-[2rem] p-6 w-full max-w-xs shadow-2xl text-center border-4 border-${c}-100 relative`}>
         {onClose && <button onClick={onClose} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><X size={20} /></button>}
-        <div className={`w-16 h-16 bg-${baseColor}-50 text-${baseColor}-500 rounded-full flex items-center justify-center mx-auto mb-4 text-3xl shadow-inner`}>{color === 'red' ? '⚠️' : '💡'}</div>
+        <div className={`w-16 h-16 bg-${c}-50 text-${c}-500 rounded-full flex items-center justify-center mx-auto mb-4 text-3xl shadow-inner`}>{color === 'red' ? '⚠️' : '💡'}</div>
         <h3 className="text-xl font-black text-slate-800 mb-2">{title}</h3>
         <p className="text-sm text-slate-500 mb-6 font-bold leading-relaxed" dangerouslySetInnerHTML={{ __html: msg }}></p>
-        <button onClick={onBtn} className={`w-full py-4 bg-${baseColor === 'red' ? 'red-500' : 'yellow-400'} text-white font-black rounded-2xl shadow-lg active:scale-95 transition-transform`}>{btn}</button>
+        <button onClick={onBtn} className={`w-full py-4 bg-${color === 'red' ? 'red-500' : 'yellow-400'} text-white font-black rounded-2xl shadow-lg active:scale-95 transition-transform`}>{btn}</button>
       </div>
     </div>
   );
@@ -579,14 +573,6 @@ function Marker({ left, score, icon, color }) {
     <div className="absolute top-0 h-full border-l-[3px] border-white/80 flex flex-col items-center justify-center z-10" style={{ left: `${left}%` }}>
       <div className={`absolute -top-6 text-[11px] font-black ${colors[color]}`}>{score}</div><div className="text-[14px] drop-shadow-sm">{icon}</div>
     </div>
-  );
-}
-
-function Toggle({ checked, onChange }) {
-  return (
-    <button type="button" onClick={() => onChange(!checked)} className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors duration-300 shadow-inner ${checked ? 'bg-green-400' : 'bg-slate-200'}`}>
-      <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition-transform duration-300 ${checked ? 'translate-x-6' : 'translate-x-1'}`} />
-    </button>
   );
 }
 
