@@ -9,13 +9,9 @@ import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
   signInWithPopup, 
-  signInWithRedirect, 
-  getRedirectResult, 
   GoogleAuthProvider, 
   onAuthStateChanged, 
-  signOut,
-  setPersistence,
-  browserLocalPersistence
+  signOut 
 } from 'firebase/auth';
 import { 
   getFirestore, 
@@ -30,7 +26,6 @@ import {
 
 // --- Firebase 初始化 ---
 // ⚠️ 務必在此處填入您從 Firebase Console 取得的金鑰 ⚠️
-// 💡 特別檢查：authDomain 必須與您的 Vercel 網址或 firebaseapp.com 一致
 const firebaseConfig = {
   apiKey: "AIzaSyDOEU8JitsOszMaQyBt2dhD-9iF4f1ZVs8",
   authDomain: "my-habit-tracker-v1.firebaseapp.com",
@@ -103,7 +98,7 @@ const triggerConfetti = (type) => {
 export default function App() {
   const [user, setUser] = useState(null);
   const [authReady, setAuthReady] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(true); 
+  const [isProcessing, setIsProcessing] = useState(false); 
   const [activeTab, setActiveTab] = useState('today'); 
   const [toastMsg, setToastMsg] = useState('');
   
@@ -135,64 +130,39 @@ export default function App() {
     return () => { if (document.body.contains(script)) document.body.removeChild(script); };
   }, []);
 
-  // 2. 強化版 Auth 監聽：解決手機登入迴圈
+  // 2. 簡化版 Auth 監聽：因為改用 Popup，不需要再處理複雜的跳轉邏輯
   useEffect(() => {
-    const initAuth = async () => {
-      try {
-        // A. 強制持久化登入狀態
-        await setPersistence(auth, browserLocalPersistence);
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setAuthReady(true);
+      setIsProcessing(false);
+    });
+    return () => unsub();
+  }, []);
 
-        // B. 檢查是否是從 Redirect 回來的
-        const result = await getRedirectResult(auth);
-        if (result?.user) {
-          setUser(result.user);
-          console.log("Redirect Login Success");
-        }
-      } catch (error) {
-        console.error("Auth Init Error:", error);
-        // 如果是跨網域問題，這裡會報錯
-        if (error.code === 'auth/cross-origin-isolated-biometric-fallback') {
-          showToast("瀏覽器限制了登入，請嘗試在一般分頁開啟。");
-        }
-      } finally {
-        // C. 監聽狀態變化 (這是最準確的登入判斷)
-        const unsub = onAuthStateChanged(auth, (u) => {
-          setUser(u);
-          setAuthReady(true);
-          setIsProcessing(false);
-        });
-        return unsub;
-      }
-    };
-
-    const unsubAuth = initAuth();
-    return () => { if (typeof unsubAuth === 'function') unsubAuth(); };
-  }, [showToast]);
-
+  // 全面改用 signInWithPopup 解決手機瀏覽器阻擋跨域 Cookie 的問題
   const handleGoogleLogin = async () => {
-    const provider = new GoogleAuthProvider();
-    // 讓每次登入都強制顯示帳號選擇器 (解決自動跳轉問題)
-    provider.setCustomParameters({ prompt: 'select_account' });
-    
-    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+    if (isProcessing) return;
     setIsProcessing(true);
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
 
     try {
-      if (isMobile) {
-        await signInWithRedirect(auth, provider);
-      } else {
-        const result = await signInWithPopup(auth, provider);
-        setUser(result.user);
-        setIsProcessing(false);
-      }
+      const result = await signInWithPopup(auth, provider);
+      setUser(result.user);
     } catch (error) {
-      console.error(error);
-      showToast("無法啟動登入視窗。");
+      console.error("Login Error:", error);
+      if (error.code === 'auth/popup-blocked' || error.code === 'auth/popup-closed-by-user') {
+        showToast("登入視窗被阻擋了！請勿在無痕模式或 Line 內建瀏覽器中使用。");
+      } else {
+        showToast("登入失敗，請檢查網路連線後重試。");
+      }
+    } finally {
       setIsProcessing(false);
     }
   };
 
-  // 3. 監聽 Firestore 資料 (保持不變)
+  // 3. 監聽 Firestore 資料
   useEffect(() => {
     if (!user) return;
     const privatePath = (col) => collection(db, 'artifacts', appId, 'users', user.uid, col);
@@ -211,7 +181,7 @@ export default function App() {
     return () => unsubs.forEach(unsub => unsub());
   }, [user]);
 
-  // 結算報告邏輯 (保持不變)
+  // 結算報告邏輯
   useEffect(() => {
     if (!user || !profile?.displayName) return;
     const prevWeekId = getPreviousWeekId(currentWeekId);
@@ -337,38 +307,30 @@ export default function App() {
   };
   const theme = getTheme();
 
-  // 渲染：等待中
-  if (!authReady || isProcessing) return <div className="flex flex-col items-center justify-center h-screen bg-pink-50 text-pink-400 font-bold"><Sparkles className="animate-spin mb-4" size={40} /> 正在與雲端連線中...</div>;
+  if (!authReady) return <div className="flex flex-col items-center justify-center h-screen bg-pink-50 text-pink-400 font-bold"><Sparkles className="animate-spin mb-4" size={40} /> 魔法載入中...</div>;
   
-  // 渲染：未登入
   if (!user) return (
-    <div className="flex flex-col h-screen max-w-md mx-auto bg-gradient-to-br from-pink-50 via-white to-purple-50 items-center justify-center p-8 text-center sm:border-x sm:border-pink-100 font-sans">
+    <div className="flex flex-col h-screen max-w-md mx-auto bg-gradient-to-br from-pink-50 via-white to-purple-50 items-center justify-center p-8 text-center sm:border-x sm:border-pink-100 font-sans relative overflow-hidden">
+      <Toast message={toastMsg} onClose={() => setToastMsg('')} />
       <Award size={80} className="text-pink-500 mb-6 drop-shadow-lg" />
       <h1 className="text-3xl font-black bg-gradient-to-r from-pink-500 to-purple-500 bg-clip-text text-transparent mb-4">目標追蹤器</h1>
-      <p className="text-slate-500 mb-12 font-bold">登入以永久保存您的專屬紀錄與可愛目標！ ✨</p>
+      <p className="text-slate-500 mb-12 font-bold leading-relaxed">登入以永久保存您的專屬紀錄<br/>與可愛目標！ ✨</p>
       <button 
         onClick={handleGoogleLogin} 
-        className="w-full py-4 bg-white border-2 border-pink-100 rounded-3xl shadow-lg flex items-center justify-center gap-3 font-black text-slate-700 hover:scale-[1.02] active:scale-95 transition-all"
+        disabled={isProcessing}
+        className={`w-full py-4 bg-white border-2 border-pink-100 rounded-3xl shadow-lg flex items-center justify-center gap-3 font-black text-slate-700 hover:scale-[1.02] active:scale-95 transition-all ${isProcessing ? 'opacity-50' : ''}`}
       >
         <svg className="w-6 h-6" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
-        使用 Google 帳號登入
+        {isProcessing ? '登入連線中...' : '使用 Google 帳號登入'}
       </button>
     </div>
   );
 
-  // 渲染：已登入主畫面
   return (
     <div className={`flex flex-col h-screen max-w-md mx-auto bg-gradient-to-br ${theme.bg} overflow-hidden relative shadow-2xl sm:border-x ${theme.border} font-sans transition-all duration-500`}>
       <Toast message={toastMsg} onClose={() => setToastMsg('')} />
       {showResultModal && <WeeklyResultModal data={resultData} onClose={closeResultModal} />}
-      
-      <DeleteTaskModal 
-        isOpen={deleteDialog.isOpen} 
-        task={deleteDialog.task} 
-        activeDateStr={deleteDialog.activeDateStr} 
-        onConfirm={executeDeleteTask} 
-        onCancel={() => setDeleteDialog({ isOpen: false, task: null, activeDateStr: null })} 
-      />
+      <DeleteTaskModal isOpen={deleteDialog.isOpen} task={deleteDialog.task} activeDateStr={deleteDialog.activeDateStr} onConfirm={executeDeleteTask} onCancel={() => setDeleteDialog({ isOpen: false, task: null, activeDateStr: null })} />
 
       <header className="bg-white/70 backdrop-blur-lg px-6 py-5 shadow-sm z-10 flex justify-between items-center border-b border-white/50">
         <h1 className={`text-lg font-black bg-gradient-to-r ${theme.grad} bg-clip-text text-transparent flex items-center gap-2 truncate`}>
@@ -403,7 +365,7 @@ export default function App() {
   );
 }
 
-// --- 其餘組件保持不變 ---
+// --- 分頁與元件保持不變 ---
 function NavBtn({ icon: Icon, label, active, onClick, color }) {
   const cMap = { pink: 'text-pink-600 bg-pink-100', blue: 'text-blue-600 bg-blue-100', amber: 'text-amber-600 bg-amber-100', emerald: 'text-emerald-600 bg-emerald-100' };
   return (
