@@ -9,6 +9,8 @@ import { initializeApp } from 'firebase/app';
 import { 
   getAuth, 
   signInWithPopup, 
+  signInWithRedirect, // 新增：重定向登入
+  getRedirectResult,  // 新增：取得重定向結果
   GoogleAuthProvider, 
   onAuthStateChanged, 
   signOut 
@@ -25,7 +27,7 @@ import {
 } from 'firebase/firestore';
 
 // --- Firebase 初始化 ---
-// ⚠️ 請在下方的物件中填入您在 Firebase 控制台取得的專屬設定
+// ⚠️ 請確保這裡填入的是您自己的金鑰
 const firebaseConfig = {
   apiKey: "AIzaSyDOEU8JitsOszMaQyBt2dhD-9iF4f1ZVs8",
   authDomain: "my-habit-tracker-v1.firebaseapp.com",
@@ -100,6 +102,7 @@ const triggerConfetti = (type) => {
 export default function App() {
   const [user, setUser] = useState(null);
   const [authReady, setAuthReady] = useState(false);
+  const [isLoggingIn, setIsLoggingIn] = useState(false); // 新增：防止重複點擊
   const [activeTab, setActiveTab] = useState('today'); 
   const [toastMsg, setToastMsg] = useState('');
   
@@ -131,8 +134,13 @@ export default function App() {
     return () => { if (document.body.contains(script)) document.body.removeChild(script); };
   }, []);
 
-  // 監聽登入狀態
+  // 監聽登入狀態與重定向結果
   useEffect(() => {
+    // 處理手機跳轉回來的登入結果
+    getRedirectResult(auth).catch((error) => {
+      console.error("Redirect login error:", error);
+    });
+
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u);
       setAuthReady(true);
@@ -140,17 +148,31 @@ export default function App() {
     return () => unsub();
   }, []);
 
+  // 修改後的 Google 登入邏輯：區分電腦與手機
   const handleGoogleLogin = async () => {
+    if (isLoggingIn) return;
+    setIsLoggingIn(true);
+    
     const provider = new GoogleAuthProvider();
+    // 偵測是否為手機或平板
+    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
     try {
-      await signInWithPopup(auth, provider);
+      if (isMobile) {
+        // 手機端：直接在原頁面跳轉 (解決彈出視窗被阻擋的問題)
+        await signInWithRedirect(auth, provider);
+      } else {
+        // 電腦端：使用彈出視窗 (體驗較好)
+        await signInWithPopup(auth, provider);
+      }
     } catch (error) {
       console.error(error);
-      showToast('登入失敗，請檢查網路！');
+      showToast('登入失敗，請檢查網路或更換瀏覽器！');
+      setIsLoggingIn(false);
     }
   };
 
-  // 監聽 Firestore 資料
+  // 監聽 Firestore 資料 (這部分邏輯不變)
   useEffect(() => {
     if (!user) return;
     const privatePath = (col) => collection(db, 'artifacts', appId, 'users', user.uid, col);
@@ -264,7 +286,6 @@ export default function App() {
     }
   };
 
-  // 操作：儲存任務
   const handleSaveTask = async (taskData) => {
     const targetDate = taskData.date || todayDateStr;
     const dayPoints = getTasksForDate(tasks, targetDate).reduce((acc, t) => acc + (t.id === taskData.id ? 0 : Number(t.points)), 0);
@@ -274,7 +295,6 @@ export default function App() {
     showToast('儲存成功！'); return true;
   };
 
-  // 操作：執行刪除
   const executeDeleteTask = async (type) => {
     const { task, activeDateStr } = deleteDialog;
     if (task.recurrence === 'once' || type === 'all') {
@@ -290,7 +310,6 @@ export default function App() {
     setDeleteDialog({ isOpen: false, task: null, activeDateStr: null }); showToast('已刪除！');
   };
 
-  // 主題色定義
   const getTheme = () => {
     if (activeTab === 'today') return { bg: 'from-pink-50 via-white to-purple-50', border: 'sm:border-pink-100', text: 'text-pink-500', grad: 'from-pink-500 to-purple-500', btn: 'pink' };
     if (activeTab === 'history') return { bg: 'from-blue-50 via-white to-sky-50', border: 'sm:border-blue-100', text: 'text-blue-500', grad: 'from-blue-500 to-sky-500', btn: 'blue' };
@@ -300,17 +319,22 @@ export default function App() {
   };
   const theme = getTheme();
 
-  // 登入判斷
   if (!authReady) return <div className="flex items-center justify-center h-screen bg-pink-50 text-pink-400 font-bold animate-pulse">魔法載入中...</div>;
+  
   if (!user) return (
     <div className="flex flex-col h-screen max-w-md mx-auto bg-gradient-to-br from-pink-50 via-white to-purple-50 items-center justify-center p-8 text-center sm:border-x sm:border-pink-100 font-sans">
       <Award size={80} className="text-pink-500 mb-6 drop-shadow-lg" />
       <h1 className="text-3xl font-black bg-gradient-to-r from-pink-500 to-purple-500 bg-clip-text text-transparent mb-4">目標追蹤器</h1>
       <p className="text-slate-500 mb-12 font-bold">登入以永久保存您的專屬紀錄與可愛目標！ ✨</p>
-      <button onClick={handleGoogleLogin} className="w-full py-4 bg-white border-2 border-pink-100 rounded-3xl shadow-lg flex items-center justify-center gap-3 font-black text-slate-700 hover:scale-[1.02] active:scale-95 transition-all">
+      <button 
+        onClick={handleGoogleLogin} 
+        disabled={isLoggingIn}
+        className={`w-full py-4 bg-white border-2 border-pink-100 rounded-3xl shadow-lg flex items-center justify-center gap-3 font-black text-slate-700 hover:scale-[1.02] active:scale-95 transition-all ${isLoggingIn ? 'opacity-50 cursor-not-allowed' : ''}`}
+      >
         <svg className="w-6 h-6" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
-        使用 Google 帳號登入
+        {isLoggingIn ? '登入中...' : '使用 Google 帳號登入'}
       </button>
+      {isLoggingIn && <p className="mt-4 text-xs text-slate-400">請稍候，正在帶領您前往 Google 驗證頁面...</p>}
     </div>
   );
 
@@ -339,20 +363,7 @@ export default function App() {
 
       <main className="flex-1 overflow-y-auto pb-28">
         {activeTab === 'history' && viewingHistoryDate ? (
-          <DayView 
-            activeDateStr={viewingHistoryDate} 
-            todayDateStr={todayDateStr} 
-            tasks={tasks} 
-            getTasksForDate={getTasksForDate} 
-            getScoreInfoForDate={getScoreInfoForDate} 
-            onToggle={handleToggleTask} 
-            onAdd={handleSaveTask} 
-            onDelete={(t, date) => setDeleteDialog({ isOpen: true, task: t, activeDateStr: date })} 
-            onCopy={(t, date) => setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', Date.now().toString()), { ...t, id: Date.now().toString(), completedDates: [], createdAt: date })} 
-            onBack={() => setViewingHistoryDate(null)} 
-            showToast={showToast} 
-            profile={profile} 
-          />
+          <DayView activeDateStr={viewingHistoryDate} todayDateStr={todayDateStr} tasks={tasks} getTasksForDate={getTasksForDate} getScoreInfoForDate={getScoreInfoForDate} onToggle={handleToggleTask} onAdd={handleSaveTask} onDelete={(t, date) => setDeleteDialog({ isOpen: true, task: t, activeDateStr: date })} onCopy={(t, date) => setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', Date.now().toString()), { ...t, id: Date.now().toString(), completedDates: [], createdAt: date })} onBack={() => setViewingHistoryDate(null)} showToast={showToast} profile={profile} />
         ) : (
           <>
             {activeTab === 'today' && <DayView activeDateStr={todayDateStr} todayDateStr={todayDateStr} tasks={tasks} getTasksForDate={getTasksForDate} getScoreInfoForDate={getScoreInfoForDate} onToggle={handleToggleTask} onAdd={handleSaveTask} onDelete={(t, date) => setDeleteDialog({ isOpen: true, task: t, activeDateStr: date })} onCopy={(t, date) => setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', Date.now().toString()), { ...t, id: Date.now().toString(), completedDates: [], createdAt: date })} isTodayView={true} currentWeekScore={currentWeekScore} showToast={showToast} profile={profile} />}
@@ -373,7 +384,7 @@ export default function App() {
   );
 }
 
-// --- 分頁與元件 ---
+// --- 分頁與元件 (其餘部分保持不變) ---
 
 function NavBtn({ icon: Icon, label, active, onClick, color }) {
   const cMap = { pink: 'text-pink-600 bg-pink-100', blue: 'text-blue-600 bg-blue-100', amber: 'text-amber-600 bg-amber-100', emerald: 'text-emerald-600 bg-emerald-100' };
@@ -576,5 +587,41 @@ function Toggle({ checked, onChange }) {
     <button type="button" onClick={() => onChange(!checked)} className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors duration-300 shadow-inner ${checked ? 'bg-green-400' : 'bg-slate-200'}`}>
       <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-md transition-transform duration-300 ${checked ? 'translate-x-6' : 'translate-x-1'}`} />
     </button>
+  );
+}
+
+function DeleteTaskModal({ isOpen, task, activeDateStr, onConfirm, onCancel }) {
+  if (!isOpen || !task) return null;
+  const isRecurrent = task.recurrence !== 'once';
+  return (
+    <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-[110] animate-fade-in">
+      <div className="bg-white rounded-[2rem] p-6 w-full max-w-sm shadow-2xl border-4 border-red-50 relative">
+        <div className="flex justify-between items-center mb-4"><h3 className="text-xl font-black text-slate-800 flex items-center gap-2"><AlertTriangle className="text-red-500" /> 刪除確認</h3><button onClick={onCancel}><X size={24} /></button></div>
+        <p className="font-bold text-slate-500 mb-6">您確定要刪除「{task.title}」嗎？</p>
+        <div className="space-y-3">
+          {isRecurrent ? (
+            <>
+              <button onClick={() => onConfirm('single')} className="w-full py-4 bg-white border-2 border-red-100 text-red-500 font-black rounded-2xl hover:bg-red-50 active:scale-95 transition-all">僅刪除今日 ({activeDateStr})</button>
+              <button onClick={() => onConfirm('future')} className="w-full py-4 bg-white border-2 border-red-200 text-red-600 font-black rounded-2xl hover:bg-red-50 active:scale-95 transition-all">刪除今日及未來</button>
+              <button onClick={() => onConfirm('all')} className="w-full py-4 bg-red-500 text-white font-black rounded-2xl shadow-lg active:scale-95 transition-all">徹底永久刪除</button>
+            </>
+          ) : (
+            <button onClick={() => onConfirm('all')} className="w-full py-4 bg-red-500 text-white font-black rounded-2xl shadow-lg active:scale-95 transition-all">確認刪除</button>
+          )}
+          <button onClick={onCancel} className="w-full py-3 text-slate-400 font-bold">取消</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Toast({ message, onClose }) {
+  if (!message) return null;
+  return (
+    <div className="fixed top-24 left-1/2 -translate-x-1/2 z-[300] animate-bounce-in">
+      <div className="bg-slate-800 text-white px-6 py-3 rounded-full shadow-2xl font-black text-sm flex items-center gap-2 border-2 border-white/20 whitespace-nowrap">
+        <Sparkles size={16} className="text-yellow-400" /> {message}
+      </div>
+    </div>
   );
 }
