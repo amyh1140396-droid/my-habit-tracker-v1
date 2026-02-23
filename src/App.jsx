@@ -110,6 +110,7 @@ export default function App() {
 
   const [viewingHistoryDate, setViewingHistoryDate] = useState(null);
   const [deleteDialog, setDeleteDialog] = useState({ isOpen: false, task: null, activeDateStr: null });
+  const [editDialog, setEditDialog] = useState({ isOpen: false, oldTask: null, newTask: null, activeDateStr: null });
   const [showResultModal, setShowResultModal] = useState(false);
   const [resultData, setResultData] = useState(null);
 
@@ -130,7 +131,7 @@ export default function App() {
     return () => { if (document.body.contains(script)) document.body.removeChild(script); };
   }, []);
 
-  // 2. 簡化版 Auth 監聽：因為改用 Popup，不需要再處理複雜的跳轉邏輯
+  // 2. 簡化版 Auth 監聽
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u);
@@ -202,7 +203,8 @@ export default function App() {
   const closeResultModal = async () => {
     setShowResultModal(false);
     const prevWeekId = getPreviousWeekId(currentWeekId);
-    await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'data'), { lastSeenResultWeekId: prevWeekId }, { merge: true });
+    // 移除 await，讓視窗立刻關閉
+    setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'data'), { lastSeenResultWeekId: prevWeekId }, { merge: true });
   };
 
   const getTasksForDate = useCallback((allTasks, targetDateStr) => {
@@ -258,8 +260,10 @@ export default function App() {
     }
     
     const updatedDates = isCompleted ? [...(task.completedDates || []), targetDateStr] : (task.completedDates || []).filter(d => d !== targetDateStr);
-    await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', task.id), { ...task, completedDates: updatedDates });
-    await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'daily_scores', targetDateStr), { date: targetDateStr, score: newCappedScore });
+    
+    // 移除 await，讓勾選任務瞬間反應
+    setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', task.id), { ...task, completedDates: updatedDates });
+    setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'daily_scores', targetDateStr), { date: targetDateStr, score: newCappedScore });
     
     const targetWeekId = getWeekId(targetDateStr);
     const pref = preferences.find(p => p.id === targetWeekId);
@@ -270,32 +274,87 @@ export default function App() {
         if (dStr === targetDateStr) weekTotal += newCappedScore;
         else { const ds = dailyScores.find(x => x.date === dStr); if (ds) weekTotal += ds.score; }
       }
-      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'leaderboard', `${targetWeekId}_${user.uid}`), { weekId: targetWeekId, userId: user.uid, displayName: profile.displayName, score: weekTotal });
+      setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'leaderboard', `${targetWeekId}_${user.uid}`), { weekId: targetWeekId, userId: user.uid, displayName: profile.displayName, score: weekTotal });
     }
   };
 
-  const handleSaveTask = async (taskData) => {
-    const targetDate = taskData.date || todayDateStr;
-    const dayPoints = getTasksForDate(tasks, targetDate).reduce((acc, t) => acc + (t.id === taskData.id ? 0 : Number(t.points)), 0);
-    if (dayPoints + Number(taskData.points) > 100) { showToast(`${targetDate} 總分將超過 100，請修改！`); return false; }
+  const handleSaveTask = async (taskData, targetDateStr) => {
+    targetDateStr = targetDateStr || todayDateStr;
+    const dayPoints = getTasksForDate(tasks, targetDateStr).reduce((acc, t) => acc + (t.id === taskData.id ? 0 : Number(t.points)), 0);
+    if (dayPoints + Number(taskData.points) > 100) { showToast(`總分將超過 100，請修改！`); return false; }
+
+    const originalTask = tasks.find(t => t.id === taskData.id);
+    // 如果修改的是已存在的「週期性目標」，則攔截並跳出選項視窗
+    if (originalTask && originalTask.recurrence !== 'once') {
+        setEditDialog({ isOpen: true, oldTask: originalTask, newTask: taskData, activeDateStr: targetDateStr });
+        return true; 
+    }
+
     const taskId = taskData.id || Date.now().toString();
-    await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', taskId), { ...taskData, id: taskId, completedDates: taskData.completedDates || [], createdAt: taskData.createdAt || todayDateStr });
-    showToast('儲存成功！'); return true;
+    
+    // 移除 await：資料庫寫入交給背景處理，讓新增視窗瞬間關閉
+    setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', taskId), { ...taskData, id: taskId, completedDates: taskData.completedDates || [], createdAt: taskData.createdAt || targetDateStr });
+    
+    showToast('儲存成功！'); 
+    return true; 
   };
 
   const executeDeleteTask = async (type) => {
     const { task, activeDateStr } = deleteDialog;
+    
+    // 移除 await：讓刪除視窗瞬間關閉
     if (task.recurrence === 'once' || type === 'all') {
-      await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', task.id));
+      deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', task.id));
     } else if (type === 'single') {
-      await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', task.id), { ...task, excludedDates: [...(task.excludedDates || []), activeDateStr] });
+      setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', task.id), { ...task, excludedDates: [...(task.excludedDates || []), activeDateStr] });
     } else if (type === 'future') {
       const prevD = new Date(activeDateStr); prevD.setDate(prevD.getDate() - 1);
       const end = formatLocal(prevD);
-      if (end < task.createdAt) await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', task.id));
-      else await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', task.id), { ...task, endDate: end });
+      if (end < task.createdAt) deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', task.id));
+      else setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', task.id), { ...task, endDate: end });
     }
-    setDeleteDialog({ isOpen: false, task: null, activeDateStr: null }); showToast('已刪除！');
+    
+    setDeleteDialog({ isOpen: false, task: null, activeDateStr: null }); 
+    showToast('已刪除！');
+  };
+
+  const executeEditTask = async (type) => {
+    const { oldTask, newTask, activeDateStr } = editDialog;
+    
+    if (type === 'single') {
+      // 1. 舊目標排除這一天
+      setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', oldTask.id), { ...oldTask, excludedDates: [...(oldTask.excludedDates || []), activeDateStr] });
+      // 2. 建立新單次目標
+      const wasCompleted = oldTask.completedDates?.includes(activeDateStr);
+      const newId = Date.now().toString();
+      setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', newId), {
+        ...newTask, id: newId, recurrence: 'once', date: activeDateStr, createdAt: activeDateStr,
+        completedDates: wasCompleted ? [activeDateStr] : [], excludedDates: []
+      });
+    } else if (type === 'future') {
+      const prevD = new Date(activeDateStr); prevD.setDate(prevD.getDate() - 1);
+      const end = formatLocal(prevD);
+      
+      const futureCompleted = (oldTask.completedDates || []).filter(d => d >= activeDateStr);
+      const pastCompleted = (oldTask.completedDates || []).filter(d => d < activeDateStr);
+
+      // 1. 舊目標於昨天結束 (確保不溯及過往)
+      if (end < oldTask.createdAt) {
+        deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', oldTask.id));
+      } else {
+        setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', oldTask.id), { ...oldTask, endDate: end, completedDates: pastCompleted });
+      }
+
+      // 2. 新目標從今天開始
+      const newId = Date.now().toString();
+      setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'tasks', newId), {
+        ...newTask, id: newId, createdAt: activeDateStr, completedDates: futureCompleted,
+        excludedDates: (oldTask.excludedDates || []).filter(d => d >= activeDateStr)
+      });
+    }
+    
+    setEditDialog({ isOpen: false, oldTask: null, newTask: null, activeDateStr: null }); 
+    showToast('修改成功！');
   };
 
   const getTheme = () => {
@@ -331,6 +390,7 @@ export default function App() {
       <Toast message={toastMsg} onClose={() => setToastMsg('')} />
       {showResultModal && <WeeklyResultModal data={resultData} onClose={closeResultModal} />}
       <DeleteTaskModal isOpen={deleteDialog.isOpen} task={deleteDialog.task} activeDateStr={deleteDialog.activeDateStr} onConfirm={executeDeleteTask} onCancel={() => setDeleteDialog({ isOpen: false, task: null, activeDateStr: null })} />
+      <EditTaskModal isOpen={editDialog.isOpen} oldTask={editDialog.oldTask} activeDateStr={editDialog.activeDateStr} onConfirm={executeEditTask} onCancel={() => setEditDialog({ isOpen: false, oldTask: null, newTask: null, activeDateStr: null })} />
 
       <header className="bg-white/70 backdrop-blur-lg px-6 py-5 shadow-sm z-10 flex justify-between items-center border-b border-white/50">
         <h1 className={`text-lg font-black bg-gradient-to-r ${theme.grad} bg-clip-text text-transparent flex items-center gap-2 truncate`}>
@@ -394,7 +454,7 @@ function DayView({ activeDateStr, todayDateStr, tasks, getTasksForDate, getScore
     <div className="p-5 space-y-6 animate-fade-in relative min-h-full">
       {onBack && <button onClick={onBack} className="flex items-center gap-2 text-blue-500 font-bold bg-white px-4 py-2 rounded-full shadow border border-blue-50 hover:bg-blue-50"><ArrowLeft size={18} /> 返回月曆</button>}
       
-      {showOver && <Modal title="總分超過上限！" msg={`已達 ${totalPossible} 分，已經超過每日 100 分的上限。`} btn="去修改" onBtn={() => setShowOver(false)} color="red" />}
+      {showOver && <Modal title="總分超過上限！" msg={`已達 ${totalPossible} 分，<br/>已經超過每日 100 分的上限。`} btn="去修改" onBtn={() => setShowOver(false)} color="red" />}
       {showUnder && <Modal title="目標未達滿分喔！" msg={`目前僅 ${totalPossible} 分，尚未滿 100 分呢！<br/>快來設定挑戰吧！`} btn="去新增" onBtn={() => {setShowUnder(false); setIsModalOpen(true);}} color="yellow" onClose={() => setShowUnder(false)} />}
       
       <div className="bg-white rounded-[2rem] p-6 shadow-xl border-2 border-pink-50 flex flex-col items-center cursor-pointer active:scale-95 overflow-hidden group min-h-[160px]" onClick={() => isTodayView && setDisplayMode(prev => prev === 'today' ? 'week' : 'today')}>
@@ -407,7 +467,12 @@ function DayView({ activeDateStr, todayDateStr, tasks, getTasksForDate, getScore
           </div>
         ) : (
           <div className="w-full pt-2 animate-fade-in">
-            <div className="flex justify-between items-end mb-4"><div className="flex flex-col"><span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">本週結算</span><span className="text-5xl font-black text-purple-600">{currentWeekScore}</span></div><span className={`px-3 py-1.5 rounded-full text-xs font-black border-2 ${getMedal(currentWeekScore).bg} ${getMedal(currentWeekScore).border}`}>{getMedal(currentWeekScore).icon} {getMedal(currentWeekScore).name}</span></div>
+            <div className="flex justify-between items-end mb-4">
+              <div className="flex flex-col"><span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">本週結算</span><span className="text-5xl font-black text-purple-600">{currentWeekScore}</span></div>
+              {getMedal(currentWeekScore).name !== '無' && (
+                <span className={`px-3 py-1.5 rounded-full text-xs font-black border-2 ${getMedal(currentWeekScore).bg} ${getMedal(currentWeekScore).border}`}>{getMedal(currentWeekScore).icon} {getMedal(currentWeekScore).name}</span>
+              )}
+            </div>
             <div className="relative w-full h-8 bg-slate-100 rounded-full shadow-inner mt-4 overflow-visible">
               <div className="h-full bg-gradient-to-r from-orange-300 via-pink-400 to-yellow-400 rounded-full" style={{ width: `${Math.min(100, (currentWeekScore/700)*100)}%` }}></div>
               <Marker left={(200/700)*100} score="200" icon="✨" color="orange" /><Marker left={(450/700)*100} score="450" icon="⭐" color="slate" /><Marker left={(680/700)*100} score="680" icon="👑" color="yellow" />
@@ -434,7 +499,7 @@ function DayView({ activeDateStr, todayDateStr, tasks, getTasksForDate, getScore
         })}
       </div>
       <button onClick={() => {setEditing(null); setIsModalOpen(true);}} className="fixed bottom-28 right-6 w-16 h-16 bg-gradient-to-r from-pink-500 to-purple-500 text-white rounded-full shadow-xl flex items-center justify-center border-4 border-white active:scale-90 transition-transform"><Plus size={32} strokeWidth={3} /></button>
-      {isModalOpen && <TaskModal onClose={() => setIsModalOpen(false)} onSave={onAdd} activeDateStr={activeDateStr} initialData={editing} showToast={showToast} />}
+      {isModalOpen && <TaskModal onClose={() => setIsModalOpen(false)} onSave={(data) => onAdd(data, activeDateStr)} activeDateStr={activeDateStr} initialData={editing} showToast={showToast} />}
     </div>
   );
 }
@@ -504,14 +569,72 @@ function TaskModal({ onClose, onSave, activeDateStr, initialData, showToast }) {
   const [title, setTitle] = useState(initialData?.title || '');
   const [pts, setPts] = useState(initialData?.points || 10);
   const [rec, setRec] = useState(initialData?.recurrence || 'daily');
+  
+  // 新增：儲存使用者自訂的詳細日期/星期/月日
+  const [targetDate, setTargetDate] = useState(initialData?.date || activeDateStr);
+  const [weekDay, setWeekDay] = useState(initialData?.recurrenceValue || new Date(activeDateStr).getDay().toString());
+  const [monthDay, setMonthDay] = useState(initialData?.recurrenceValue || new Date(activeDateStr).getDate().toString());
+
+  const handleSave = async () => {
+    if (!title.trim()) { showToast('請輸入目標名稱！'); return; }
+    
+    let finalRecVal = '';
+    if (rec === 'weekly') finalRecVal = weekDay.toString();
+    if (rec === 'monthly') finalRecVal = monthDay.toString();
+    
+    const ok = await onSave({
+      ...initialData,
+      title,
+      points: Number(pts),
+      recurrence: rec,
+      recurrenceValue: finalRecVal,
+      date: rec === 'once' ? targetDate : null
+    }, activeDateStr); 
+    
+    if (ok) onClose();
+  };
+
   return (
     <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-[100] animate-fade-in"><div className="bg-white rounded-[2rem] p-6 w-full max-w-sm shadow-2xl border-4 border-pink-100 relative overflow-y-auto max-h-[90vh]">
-      <div className="flex justify-between items-center mb-6"><h3 className="text-xl font-black text-slate-800">🎯 {initialData ? '修改目標' : '新增目標'}</h3><button onClick={onClose}><X size={24} /></button></div>
+      <div className="flex justify-between items-center mb-6"><h3 className="text-xl font-black text-slate-800">🎯 {initialData ? '修改目標' : '新增目標'}</h3><button type="button" onClick={onClose}><X size={24} /></button></div>
       <div className="space-y-4">
-        <label className="block font-black text-slate-600">目標名稱</label><input type="text" value={title} onChange={e=>setTitle(e.target.value)} placeholder="例如：喝水 2000cc" lang="zh-TW" className="w-full px-4 py-3 bg-slate-50 border-2 rounded-2xl focus:border-pink-400 outline-none font-bold" />
-        <label className="block font-black text-slate-600">分數</label><input type="number" value={pts} onChange={e=>setPts(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border-2 rounded-2xl focus:border-pink-400 outline-none font-bold" />
-        <label className="block font-black text-slate-600">重複週期</label><select value={rec} onChange={e=>setRec(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border-2 rounded-2xl focus:border-pink-400 outline-none font-bold"><option value="once">單次</option><option value="daily">每天</option><option value="weekly">每週</option><option value="monthly">每月</option></select>
-        <button onClick={async ()=>{ const ok = await onSave({...initialData, title, points: Number(pts), recurrence: rec, recurrenceValue: (rec==='weekly'?new Date(activeDateStr).getDay().toString():new Date(activeDateStr).getDate().toString())}); if(ok) onClose(); }} className="w-full py-4 bg-pink-500 text-white font-black rounded-2xl shadow-lg mt-4 active:scale-95 transition-transform">確認儲存</button>
+        <label className="block font-black text-slate-600">目標名稱</label>
+        <input type="text" value={title} onChange={e=>setTitle(e.target.value)} placeholder="例如：喝水 2000cc" lang="zh-TW" className="w-full px-4 py-3 bg-slate-50 border-2 rounded-2xl focus:border-pink-400 outline-none font-bold" />
+        
+        <label className="block font-black text-slate-600">分數</label>
+        <input type="number" value={pts} onChange={e=>setPts(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border-2 rounded-2xl focus:border-pink-400 outline-none font-bold" />
+        
+        <label className="block font-black text-slate-600">重複週期</label>
+        <select value={rec} onChange={e=>setRec(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border-2 rounded-2xl focus:border-pink-400 outline-none font-bold">
+          <option value="once">單次</option>
+          <option value="daily">每天</option>
+          <option value="weekly">每週</option>
+          <option value="monthly">每月</option>
+        </select>
+
+        {/* 依據週期選項動態顯示對應的輸入框 */}
+        {rec === 'once' && (
+          <>
+            <label className="block font-black text-slate-600">執行日期</label>
+            <input type="date" value={targetDate} onChange={e=>setTargetDate(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border-2 rounded-2xl focus:border-pink-400 outline-none font-bold" />
+          </>
+        )}
+        {rec === 'weekly' && (
+          <>
+            <label className="block font-black text-slate-600">每週星期幾</label>
+            <select value={weekDay} onChange={e=>setWeekDay(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border-2 rounded-2xl focus:border-pink-400 outline-none font-bold">
+              <option value="0">星期日</option><option value="1">星期一</option><option value="2">星期二</option><option value="3">星期三</option><option value="4">星期四</option><option value="5">星期五</option><option value="6">星期六</option>
+            </select>
+          </>
+        )}
+        {rec === 'monthly' && (
+          <>
+            <label className="block font-black text-slate-600">每月幾號</label>
+            <input type="number" min="1" max="31" value={monthDay} onChange={e=>setMonthDay(e.target.value)} className="w-full px-4 py-3 bg-slate-50 border-2 rounded-2xl focus:border-pink-400 outline-none font-bold" />
+          </>
+        )}
+
+        <button onClick={handleSave} className="w-full py-4 bg-pink-500 text-white font-black rounded-2xl shadow-lg mt-4 active:scale-95 transition-transform">確認儲存</button>
       </div>
     </div></div>
   );
@@ -540,7 +663,10 @@ function WeeklyResultModal({ data, onClose }) {
       <div className="bg-white rounded-[2.5rem] p-8 w-full max-w-sm shadow-2xl text-center border-4 border-purple-200 relative">
         <h2 className="text-2xl font-black mb-2 text-slate-800">上週結算報告 📊</h2><p className="text-xs text-slate-400 mb-6 font-bold">{getWeekRange(data.weekId)}</p>
         <div className="text-6xl font-black text-purple-600 mb-4 drop-shadow-sm">{data.score}</div>
-        <div className="flex justify-center gap-2 mb-8"><span className={`px-4 py-1.5 rounded-full text-sm font-black border-2 ${m.bg} ${m.border}`}>{m.icon} {m.name}</span>{data.rank && <span className="px-4 py-1.5 rounded-full text-sm font-black bg-blue-50 text-blue-600 border-2 border-blue-200">排行第 {data.rank} 名</span>}</div>
+        <div className="flex justify-center gap-2 mb-8">
+          {m.name !== '無' && <span className={`px-4 py-1.5 rounded-full text-sm font-black border-2 ${m.bg} ${m.border}`}>{m.icon} {m.name}</span>}
+          {data.rank && <span className="px-4 py-1.5 rounded-full text-sm font-black bg-blue-50 text-blue-600 border-2 border-blue-200">排行第 {data.rank} 名</span>}
+        </div>
         <div className="bg-slate-50 p-4 rounded-2xl mb-8 font-bold text-slate-600">每一天都在變得更好！繼續加油喔！🔥</div>
         <button onClick={onClose} className="w-full py-4 bg-purple-500 text-white font-black rounded-2xl shadow-lg active:scale-95 transition-transform">我知道了，繼續努力！</button>
       </div>
@@ -551,8 +677,10 @@ function WeeklyResultModal({ data, onClose }) {
 function Marker({ left, score, icon, color }) {
   const colors = { orange: 'text-orange-500', slate: 'text-slate-500', yellow: 'text-yellow-600' };
   return (
-    <div className="absolute top-0 h-full border-l-[3px] border-white/80 flex flex-col items-center justify-center z-10" style={{ left: `${left}%` }}>
-      <div className={`absolute -top-6 text-[11px] font-black ${colors[color]}`}>{score}</div><div className="text-[14px] drop-shadow-sm">{icon}</div>
+    <div className="absolute top-0 h-full flex flex-col items-center justify-center z-10 w-10 -ml-5" style={{ left: `${left}%` }}>
+      <div className={`absolute -top-6 w-full text-center text-[12px] font-black ${colors[color]}`}>{score}</div>
+      <div className="absolute top-0 h-full w-[3px] bg-white/90 rounded-full shadow-sm"></div>
+      <div className="text-[14px] drop-shadow-sm z-10 relative">{icon}</div>
     </div>
   );
 }
@@ -584,6 +712,23 @@ function DeleteTaskModal({ isOpen, task, activeDateStr, onConfirm, onCancel }) {
             <button onClick={() => onConfirm('all')} className="w-full py-4 bg-red-500 text-white font-black rounded-2xl shadow-lg active:scale-95 transition-all">確認刪除</button>
           )}
           <button onClick={onCancel} className="w-full py-3 text-slate-400 font-bold">取消</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EditTaskModal({ isOpen, oldTask, activeDateStr, onConfirm, onCancel }) {
+  if (!isOpen || !oldTask) return null;
+  return (
+    <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-[110] animate-fade-in">
+      <div className="bg-white rounded-[2rem] p-6 w-full max-w-sm shadow-2xl border-4 border-blue-50 relative">
+        <div className="flex justify-between items-center mb-4"><h3 className="text-xl font-black text-slate-800 flex items-center gap-2"><Edit2 className="text-blue-500" /> 修改確認</h3><button onClick={onCancel}><X size={24} /></button></div>
+        <p className="font-bold text-slate-500 mb-6">您正在修改一項週期性目標，請問要如何套用修改？<br/>(皆不會影響過去已結算的歷史紀錄)</p>
+        <div className="space-y-3">
+          <button onClick={() => onConfirm('single')} className="w-full py-4 bg-white border-2 border-blue-100 text-blue-500 font-black rounded-2xl hover:bg-blue-50 active:scale-95 transition-all">僅修改今日 ({activeDateStr})</button>
+          <button onClick={() => onConfirm('future')} className="w-full py-4 bg-white border-2 border-blue-200 text-blue-600 font-black rounded-2xl hover:bg-blue-50 active:scale-95 transition-all">修改今日及未來</button>
+          <button onClick={onCancel} className="w-full py-3 text-slate-400 font-bold mt-2">取消</button>
         </div>
       </div>
     </div>
